@@ -272,7 +272,7 @@ export class TilingWindowManager {
             this.saveTileState(window);
 
             if (openTilingPopup)
-                await this.tryOpeningTilingPopup();
+                await this.tryOpeningTilingPopup(topTileGroup);
         }
     }
 
@@ -983,27 +983,30 @@ export class TilingWindowManager {
     /**
      * Opens the Tiling Popup, if there is unambiguous free screen space,
      * and offer to tile an open window to that spot.
+     *
+     * @param {Meta.Window[]} [topTileGroup=null] the tile group to use. If not
+     *      provided, it will be calculated.
      */
-    static async tryOpeningTilingPopup() {
+    static async tryOpeningTilingPopup(topTileGroup = null) {
         if (!Settings.getBoolean('enable-tiling-popup'))
             return;
 
         const allWs = Settings.getBoolean('tiling-popup-all-workspace');
         const openWindows = this.getWindows(allWs);
-        const topTileGroup = this.getTopTileGroup();
-        topTileGroup.forEach(w => openWindows.splice(openWindows.indexOf(w), 1));
+        const tileGroup = topTileGroup ?? this.getTopTileGroup();
+        tileGroup.forEach(w => openWindows.splice(openWindows.indexOf(w), 1));
         if (!openWindows.length)
             return;
 
-        const tRects = topTileGroup.map(w => w.tiledRect);
-        const monitor = topTileGroup[0]?.get_monitor(); // for the grace period
+        const tRects = tileGroup.map(w => w.tiledRect);
+        const monitor = tileGroup[0]?.get_monitor(); // for the grace period
         const freeSpace = this.getFreeScreen(tRects, monitor);
         if (!freeSpace)
             return;
 
         const TilingPopup = await import('./tilingPopup.js');
         const popup = new TilingPopup.TilingSwitcherPopup(openWindows, freeSpace);
-        if (!popup.show(topTileGroup))
+        if (!popup.show(tileGroup))
             popup.destroy();
     }
 
