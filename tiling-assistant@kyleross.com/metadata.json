@@ -6,9 +6,9 @@
     "49",
     "50"
   ],
-  "url": "https://github.com/Leleat/Tiling-Assistant",
-  "uuid": "tiling-assistant@leleat-on-github",
-  "gettext-domain": "tiling-assistant@leleat-on-github",
+  "url": "https://github.com/kyledross/Tiling-Assistant",
+  "uuid": "tiling-assistant@kyleross.com",
+  "gettext-domain": "tiling-assistant@kyleross.com",
   "settings-schema": "org.gnome.shell.extensions.tiling-assistant",
   "version": 54
 }
