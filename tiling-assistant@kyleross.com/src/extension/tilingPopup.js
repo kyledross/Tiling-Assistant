@@ -1,4 +1,4 @@
-import { Clutter, GLib, GObject, Meta, St } from '../dependencies/gi.js';
+import { Clutter, GLib, GObject, St } from '../dependencies/gi.js';
 import { Main } from '../dependencies/shell.js';
 import * as SwitcherPopup49 from '../dependencies/unexported/switcherPopup.js';
 import * as SwitcherPopup48 from '../dependencies/unexported/switcherPopup-48.js';
@@ -50,6 +50,11 @@ export const TilingSwitcherPopup = GObject.registerClass({
         this.tiledWindow = null;
         this._allowConsecutivePopup = allowConsecutivePopup;
         this._skipAnim = skipAnim;
+
+        this._positionCorrectionWindow = null;
+        this._positionCorrectionTimeoutId = 0;
+        // Don't connect destroy signal to clear position correction.
+        // Position correction needs to complete even after popup is destroyed.
 
         this._switcherList = new TSwitcherList(this, openWindows);
         this._items = this._switcherList.icons;
@@ -266,6 +271,23 @@ export const TilingSwitcherPopup = GObject.registerClass({
         SwitcherPopup.SwitcherPopup.prototype._finish.call(this, timestamp);
     }
 
+    _clearPositionCorrection() {
+        if (this._positionCorrectionTimeoutId) {
+            GLib.Source.remove(this._positionCorrectionTimeoutId);
+            this._positionCorrectionTimeoutId = 0;
+        }
+
+        if (this._positionCorrectionWindow) {
+            try {
+                this._positionCorrectionWindow.disconnectObject(this);
+            } catch {
+                // Ignore disconnect failures for windows that are in an
+                // unexpected state.
+            }
+            this._positionCorrectionWindow = null;
+        }
+    }
+
     fadeAndDestroy() {
         if (this._alreadyDestroyed)
             return;
@@ -274,6 +296,11 @@ export const TilingSwitcherPopup = GObject.registerClass({
 
         const canceled = !this.tiledWindow;
         this.emit('closed', canceled);
+
+        // Only clear position correction if the popup was canceled.
+        // If we successfully tiled a window, let the correction complete.
+        if (canceled)
+            this._clearPositionCorrection();
 
         this._shadeBG?.destroy();
         this._shadeBG = null;
@@ -315,35 +342,56 @@ export const TilingSwitcherPopup = GObject.registerClass({
         // Helper to verify and correct window position after tiling.
         // When tiling a maximized window, it sometimes gets sized correctly
         // but positioned incorrectly. This fixes that issue.
-        const setupPositionCorrection = () => {
-            let sizeChangedId = null;
-            let timeoutId = null;
+        //
+        // Capture the expected target rect before tiling to ensure we have
+        // the correct position even if window.tiledRect isn't set yet or
+        // gets modified during the tiling process.
+        const workArea = window.get_work_area_for_monitor(this._monitor);
+        const expectedRect = rect.addGaps(workArea, this._monitor);
 
-            const checkAndFixPosition = () => {
-                if (sizeChangedId) {
-                    window.disconnect(sizeChangedId);
-                    sizeChangedId = null;
-                }
+        const setupPositionCorrection = () => {
+            this._clearPositionCorrection();
+
+            this._positionCorrectionWindow = window;
+
+            // Track signal and timeout IDs for cleanup
+            let timeoutId = 0;
+            let signalId = 0;
+
+            const cleanup = () => {
                 if (timeoutId) {
                     GLib.Source.remove(timeoutId);
-                    timeoutId = null;
+                    timeoutId = 0;
                 }
-
-                const currentRect = window.get_frame_rect();
-                if (currentRect.x !== rect.x || currentRect.y !== rect.y)
-                    window.move_frame(true, rect.x, rect.y);
+                if (signalId) {
+                    try {
+                        window.disconnect(signalId);
+                    } catch {
+                        // Window may be in an unexpected state
+                    }
+                    signalId = 0;
+                }
+                this._positionCorrectionWindow = null;
+                this._positionCorrectionTimeoutId = 0;
             };
 
-            // Listen for size-changed signal
-            sizeChangedId = window.connect('size-changed', () => {
-                checkAndFixPosition();
-            });
+            const checkAndFixPosition = () => {
+                // If the window is already in the expected spot, do nothing.
+                const currentRect = window.get_frame_rect();
+                if (currentRect.x !== expectedRect.x || currentRect.y !== expectedRect.y)
+                    window.move_frame(true, expectedRect.x, expectedRect.y);
 
-            // Fallback timeout in case signal doesn't fire
+                cleanup();
+            };
+
+            // Fallback timeout in case signal doesn't fire.
             timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 checkAndFixPosition();
                 return GLib.SOURCE_REMOVE;
             });
+            this._positionCorrectionTimeoutId = timeoutId;
+
+            signalId = window.connect('size-changed', checkAndFixPosition);
         };
 
         // When a window is maximized or changing workspaces, wait briefly

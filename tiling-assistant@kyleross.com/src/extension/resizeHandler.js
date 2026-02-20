@@ -43,7 +43,15 @@ export default class TilingResizeHandler {
             (d, window, grabOp) => {
                 grabOp &= ~1024; // META_GRAB_OP_WINDOW_FLAG_UNCONSTRAINED
 
-                if (window && isResizing(grabOp))
+                if (!window)
+                    return;
+
+                // Defensive cleanup in case a previous resize session didn't end
+                // cleanly (e.g. missing grab-op-end).
+                if (this._activeResizeWindow && this._activeResizeWindow !== window)
+                    this._abortActiveResize();
+
+                if (isResizing(grabOp))
                     this._onResizeStarted(window, grabOp);
             },
             this
@@ -53,7 +61,18 @@ export default class TilingResizeHandler {
             (d, window, grabOp) => {
                 grabOp &= ~1024; // META_GRAB_OP_WINDOW_FLAG_UNCONSTRAINED
 
-                if (window && isResizing(grabOp))
+                if (!window)
+                    return;
+
+                // Always finish the active resize, even if the grabOp that is
+                // reported on end is unexpected.
+                if (window === this._activeResizeWindow) {
+                    const endOp = this._activeResizeGrabOp ?? grabOp;
+                    this._onResizeFinished(window, endOp);
+                    return;
+                }
+
+                if (isResizing(grabOp))
                     this._onResizeFinished(window, grabOp);
             },
             this
@@ -65,15 +84,42 @@ export default class TilingResizeHandler {
         // of the window, which will be passively resized, relative to the
         // actively resized window.
         this._resizeOps = new Map();
+
+        this._activeResizeWindow = null;
+        this._activeResizeGrabOp = null;
     }
 
     destroy() {
+        this._abortActiveResize();
         global.display.disconnectObject(this);
     }
 
+    _abortActiveResize() {
+        if (this._activeResizeWindow) {
+            try {
+                this._activeResizeWindow.disconnectObject(this);
+            } catch {
+                // Ignore disconnect failures for windows that are in an
+                // unexpected state.
+            }
+        }
+
+        this._activeResizeWindow = null;
+        this._activeResizeGrabOp = null;
+        this._preGrabRects.clear();
+        this._resizeOps.clear();
+    }
+
     _onResizeStarted(window, grabOp) {
+        // Reset any previous resize state so we don't keep stale window
+        // references or signal handlers around.
+        this._abortActiveResize();
+
         if (!window.isTiled)
             return;
+
+        this._activeResizeWindow = window;
+        this._activeResizeGrabOp = grabOp;
 
         // Use the same margin for the alignment and equality check below.
         const margin = 5;
@@ -295,20 +341,21 @@ export default class TilingResizeHandler {
 
     // Update the windows' tiledRects
     _onResizeFinished(window, grabOp) {
-        window.disconnectObject(this);
+        try {
+            window.disconnectObject(this);
 
-        if (!window.isTiled)
-            return;
+            if (!window.isTiled)
+                return;
 
-        const monitor = window.get_monitor();
-        const screenTopGap = Util.useIndividualGaps(monitor)
-            ? Util.getScaledGap('screen-top-gap', monitor)
-            : Util.getScaledGap('single-screen-gap', monitor);
-        const screenLeftGap = Util.useIndividualGaps(monitor)
-            ? Util.getScaledGap('screen-left-gap', monitor)
-            : Util.getScaledGap('single-screen-gap', monitor);
-        const windowGap = Util.getScaledGap('window-gap', monitor);
-        const workArea = window.get_work_area_for_monitor(monitor);
+            const monitor = window.get_monitor();
+            const screenTopGap = Util.useIndividualGaps(monitor)
+                ? Util.getScaledGap('screen-top-gap', monitor)
+                : Util.getScaledGap('single-screen-gap', monitor);
+            const screenLeftGap = Util.useIndividualGaps(monitor)
+                ? Util.getScaledGap('screen-left-gap', monitor)
+                : Util.getScaledGap('single-screen-gap', monitor);
+            const windowGap = Util.getScaledGap('window-gap', monitor);
+            const workArea = window.get_work_area_for_monitor(monitor);
 
         // First calculate the new tiledRect for window:
         // The new x / y coord for the window's tiledRect can be calculated by
@@ -316,6 +363,8 @@ export default class TilingResizeHandler {
         // x / y and resizing on the N or W side will translate into a 1:1 shift
         const grabbedsNewRect = new Rect(window.get_frame_rect());
         const grabbedsOldRect = this._preGrabRects.get(window);
+        if (!grabbedsOldRect)
+            return;
 
         const isResizingW = (grabOp & Meta.GrabOp.RESIZING_W) > 1;
         // Shift the tiledRect by the resize amount
@@ -385,8 +434,15 @@ export default class TilingResizeHandler {
             Twm.saveTileState(win);
         });
 
-        this._preGrabRects.clear();
-        this._resizeOps.clear();
+        } finally {
+            if (this._activeResizeWindow === window) {
+                this._activeResizeWindow = null;
+                this._activeResizeGrabOp = null;
+            }
+
+            this._preGrabRects.clear();
+            this._resizeOps.clear();
+        }
     }
 
     _onResizing(resizedWindow, grabOpV, grabOpH) {
@@ -420,6 +476,9 @@ export default class TilingResizeHandler {
         const resizedRect = new Rect(resizedWindow.get_frame_rect());
         const wRect = new Rect(window.get_frame_rect());
         const preGrabRect = this._preGrabRects.get(window);
+        if (!preGrabRect)
+            return null;
+
         const windowGap = Util.getScaledGap('window-gap', window.get_monitor());
 
         switch (grabOp) {
